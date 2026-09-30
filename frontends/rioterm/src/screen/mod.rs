@@ -1045,40 +1045,18 @@ impl Screen<'_> {
         let search_active = self.search_active();
         let binding_mode = BindingMode::new(mode, search_active);
         let mut ignore_chars = None;
+        let logical_key =
+            Self::key_for_binding(&key.logical_key, key.key_without_modifiers(), mods);
 
         for i in 0..self.bindings.len() {
             let binding = &self.bindings[i];
             let trigger = &binding.trigger;
             let action = binding.action.clone();
 
-            // We don't want the key without modifier, because it means something else most of
-            // the time. However what we want is to manually lowercase the character to account
-            // for both small and capital letters on regular characters at the same time.
-            let logical_key = if let Key::Character(ch) = key.logical_key.as_ref() {
-                // Match `Alt` bindings without `Alt` being applied, otherwise they use the
-                // composed chars, which are not intuitive to bind.
-                //
-                // On Windows, the `Ctrl + Alt` mangles `logical_key` to unidentified values, thus
-                // preventing them from being used in bindings
-                //
-                // For more see https://github.com/rust-windowing/winit/issues/2945.
-                // if (cfg!(target_os = "macos") || (cfg!(windows) && mods.control_key()))
-                // && mods.alt_key()
-                if (mods.shift_key() || mods.alt_key())
-                    || mods.alt_key() && (cfg!(windows) && mods.control_key())
-                {
-                    key.key_without_modifiers()
-                } else {
-                    Key::Character(ch.to_lowercase().into())
-                }
-            } else {
-                key.logical_key.clone()
-            };
-
-            let key_match = match (&trigger, logical_key) {
+            let key_match = match (&trigger, &logical_key) {
                 (BindingKey::Scancode(_), _) => BindingKey::Scancode(key.physical_key),
                 (_, code) => BindingKey::Keycode {
-                    key: code,
+                    key: code.clone(),
                     location: key.location,
                 },
             };
@@ -1615,6 +1593,22 @@ impl Screen<'_> {
         }
 
         ignore_chars.unwrap_or(false)
+    }
+
+    fn key_for_binding(key: &Key, unmodified_key: Key, mods: ModifiersState) -> Key {
+        match key {
+            Key::Character(_) if mods.shift_key() || mods.alt_key() => unmodified_key,
+            // Windows can report Ctrl+Alt letters as Unidentified with no text,
+            // while still providing the original letter for shortcut matching.
+            // Elsewhere, unidentified keys can represent cancelled Compose input.
+            Key::Unidentified(_)
+                if cfg!(windows) && mods.control_key() && mods.alt_key() =>
+            {
+                unmodified_key
+            }
+            Key::Character(ch) => Key::Character(ch.to_lowercase().into()),
+            _ => key.clone(),
+        }
     }
 
     pub fn split_right_with_config(&mut self, config: rio_backend::config::Config) {
@@ -5142,6 +5136,143 @@ fn post_process_hyperlink_uri(uri: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn ctrl_alt_n_matches_configured_binding_when_windows_reports_no_character() {
+        use rio_backend::config::bindings::KeyBinding;
+        use rio_window::keyboard::NativeKey;
+
+        let mods = ModifiersState::CONTROL | ModifiersState::ALT;
+        let esc = "\x1b[110;7u";
+        let bindings = crate::bindings::config_key_bindings(
+            vec![KeyBinding {
+                key: "n".into(),
+                with: "control | alt".into(),
+                action: String::new(),
+                esc: esc.into(),
+                mode: String::new(),
+            }],
+            Vec::new(),
+        );
+        let key = BindingKey::Keycode {
+            key: Screen::key_for_binding(
+                &Key::Unidentified(NativeKey::Windows(78)),
+                Key::Character("n".into()),
+                mods,
+            ),
+            location: KeyLocation::Standard,
+        };
+        let matched = bindings
+            .iter()
+            .find(|binding| binding.is_triggered_by(BindingMode::empty(), mods, &key));
+
+        assert_eq!(
+            matched.map(|binding| &binding.action),
+            Some(&Act::Esc(esc.into()))
+        );
+    }
+
+    #[test]
+    fn cancelled_compose_sequence_does_not_trigger_configured_shortcut() {
+        use rio_backend::config::bindings::KeyBinding;
+        use rio_window::keyboard::NativeKey;
+
+        // Compose, Shift+A, Shift+W cancels composition with no text on XKB.
+        let mods = ModifiersState::SHIFT;
+        let bindings = crate::bindings::config_key_bindings(
+            vec![KeyBinding {
+                key: "w".into(),
+                with: "shift".into(),
+                action: String::new(),
+                esc: "\x1b[119;2u".into(),
+                mode: String::new(),
+            }],
+            Vec::new(),
+        );
+        let key = BindingKey::Keycode {
+            key: Screen::key_for_binding(
+                &Key::Unidentified(NativeKey::Xkb(0x57)),
+                Key::Character("w".into()),
+                mods,
+            ),
+            location: KeyLocation::Standard,
+        };
+
+        assert!(!bindings.iter().any(|binding| binding.is_triggered_by(
+            BindingMode::empty(),
+            mods,
+            &key
+        )));
+    }
+
+    #[test]
+    fn existing_shortcuts_keep_their_key_identity() {
+        use rio_window::keyboard::NativeKey;
+
+        for (key, unmodified_key, mods, expected) in [
+            (
+                Key::Character("N".into()),
+                Key::Character("n".into()),
+                ModifiersState::SHIFT,
+                Key::Character("n".into()),
+            ),
+            (
+                Key::Character("ø".into()),
+                Key::Character("o".into()),
+                ModifiersState::ALT,
+                Key::Character("o".into()),
+            ),
+            (
+                Key::Named(NamedKey::ArrowUp),
+                Key::Named(NamedKey::ArrowUp),
+                ModifiersState::ALT,
+                Key::Named(NamedKey::ArrowUp),
+            ),
+            (
+                Key::Character("Ж".into()),
+                Key::Character("ж".into()),
+                ModifiersState::empty(),
+                Key::Character("ж".into()),
+            ),
+            (
+                Key::Character("@".into()),
+                Key::Character("q".into()),
+                ModifiersState::empty(),
+                Key::Character("@".into()),
+            ),
+            (
+                Key::Unidentified(NativeKey::Windows(78)),
+                Key::Character("n".into()),
+                ModifiersState::empty(),
+                Key::Unidentified(NativeKey::Windows(78)),
+            ),
+            (
+                Key::Unidentified(NativeKey::Windows(78)),
+                Key::Character("n".into()),
+                ModifiersState::SHIFT,
+                Key::Unidentified(NativeKey::Windows(78)),
+            ),
+            (
+                Key::Unidentified(NativeKey::Windows(78)),
+                Key::Character("n".into()),
+                ModifiersState::ALT,
+                Key::Unidentified(NativeKey::Windows(78)),
+            ),
+            #[cfg(not(windows))]
+            (
+                Key::Unidentified(NativeKey::Xkb(0x57)),
+                Key::Character("w".into()),
+                ModifiersState::CONTROL | ModifiersState::ALT,
+                Key::Unidentified(NativeKey::Xkb(0x57)),
+            ),
+        ] {
+            assert_eq!(
+                Screen::key_for_binding(&key, unmodified_key, mods),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn chrome_press_validates_double_click() {
