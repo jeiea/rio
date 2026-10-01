@@ -47,6 +47,7 @@ pub(crate) struct WindowState {
 
     pub ime_state: ImeState,
     pub ime_allowed: bool,
+    pub ime_committed_on_end: bool,
 
     // Used by WM_NCACTIVATE, WM_SETFOCUS and WM_KILLFOCUS
     pub is_active: bool,
@@ -170,6 +171,7 @@ impl WindowState {
 
             ime_state: ImeState::Disabled,
             ime_allowed: false,
+            ime_committed_on_end: false,
 
             is_active: false,
             is_focused: false,

@@ -1646,7 +1646,11 @@ unsafe fn public_window_callback_inner(
         WM_IME_STARTCOMPOSITION => {
             let ime_allowed = userdata.window_state_lock().ime_allowed;
             if ime_allowed {
-                userdata.window_state_lock().ime_state = ImeState::Enabled;
+                {
+                    let mut state = userdata.window_state_lock();
+                    state.ime_state = ImeState::Enabled;
+                    state.ime_committed_on_end = false;
+                }
 
                 userdata.send_event(Event::WindowEvent {
                     window_id: RootWindowId(WindowId(window)),
@@ -1658,13 +1662,17 @@ unsafe fn public_window_callback_inner(
         }
 
         WM_IME_COMPOSITION => {
-            let ime_allowed_and_composing = {
+            let ime_allowed_and_composing_or_result = {
                 let w = userdata.window_state_lock();
-                w.ime_allowed && w.ime_state != ImeState::Disabled
+                w.ime_allowed
+                    && (w.ime_state != ImeState::Disabled
+                        || ((lparam as u32 & GCS_RESULTSTR) != 0
+                            && !w.ime_committed_on_end))
             };
-            // Windows Hangul IME sends WM_IME_COMPOSITION after WM_IME_ENDCOMPOSITION, so
-            // check whether composing.
-            if ime_allowed_and_composing {
+            // Nalgaeset sends standalone digits and punctuation as a result after
+            // WM_IME_ENDCOMPOSITION, without starting a composition. Accept that
+            // result unless the end handler already committed it for a Hangul IME.
+            if ime_allowed_and_composing_or_result {
                 let ime_context = unsafe { ImeContext::current(window) };
 
                 if lparam == 0 {
@@ -1717,11 +1725,14 @@ unsafe fn public_window_callback_inner(
                 w.ime_allowed || w.ime_state != ImeState::Disabled
             };
             if ime_allowed_or_composing {
+                userdata.window_state_lock().ime_committed_on_end = false;
                 if userdata.window_state_lock().ime_state == ImeState::Preedit {
                     // Windows Hangul IME sends WM_IME_COMPOSITION after WM_IME_ENDCOMPOSITION, so
                     // trying receiving composing result and commit if exists.
                     let ime_context = unsafe { ImeContext::current(window) };
                     if let Some(text) = unsafe { ime_context.get_composed_text() } {
+                        userdata.window_state_lock().ime_committed_on_end =
+                            !text.is_empty();
                         userdata.send_event(Event::WindowEvent {
                             window_id: RootWindowId(WindowId(window)),
                             event: WindowEvent::Ime(Ime::Preedit(String::new(), None)),
