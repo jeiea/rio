@@ -271,6 +271,7 @@ mod tests {
             key: key.into(),
             with: with.into(),
             action: action.into(),
+            consume: true,
             esc: String::new(),
             mode: String::new(),
         };

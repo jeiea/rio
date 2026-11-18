@@ -11,6 +11,8 @@ pub struct KeyBinding {
     pub with: String,
     #[serde(default = "String::default")]
     pub action: String,
+    #[serde(default = "super::defaults::default_bool_true")]
+    pub consume: bool,
     #[serde(default = "String::default")]
     pub esc: String,
     #[serde(default = "String::default")]
@@ -34,6 +36,19 @@ mod tests {
     struct Root {
         #[serde(default = "Bindings::default")]
         bindings: Bindings,
+    }
+
+    #[test]
+    fn run_binding_defaults_to_consume_and_accepts_false() {
+        let bindings: Bindings = toml::from_str(
+            r#"keys = [
+                { key = "g", with = "control", action = "Run(helper)" },
+                { key = "[", with = "control", action = "Run(helper)", consume = false },
+            ]"#,
+        )
+        .unwrap();
+        assert!(bindings.keys[0].consume);
+        assert!(!bindings.keys[1].consume);
     }
 
     #[test]

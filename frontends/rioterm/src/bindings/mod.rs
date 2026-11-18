@@ -208,6 +208,12 @@ impl Program {
     }
 }
 
+impl Action {
+    pub fn is_passthrough_run(&self) -> bool {
+        matches!(self, Self::Run { consume: false, .. })
+    }
+}
+
 impl From<String> for Action {
     fn from(action: String) -> Action {
         let action = action.to_lowercase();
@@ -290,24 +296,17 @@ impl From<String> for Action {
         let re = regex::Regex::new(r"run\(([^()]+)\)").unwrap();
         for capture in re.captures_iter(&action) {
             if let Some(matched) = capture.get(1) {
-                let matched_string = matched.as_str().to_string();
-                if matched_string.contains(' ') {
-                    let mut vec_program_with_args: Vec<String> =
-                        matched_string.split(' ').map(|s| s.to_string()).collect();
-                    if vec_program_with_args.is_empty() {
-                        continue;
-                    }
-
-                    let program = vec_program_with_args[0].to_string();
-                    vec_program_with_args.remove(0);
-
-                    return Action::Run(Program::WithArgs {
-                        program,
-                        args: vec_program_with_args,
-                    });
-                } else {
-                    return Action::Run(Program::Just(matched_string));
-                }
+                let program = match matched.as_str().split_once(' ') {
+                    Some((name, args)) => Program::WithArgs {
+                        program: name.to_owned(),
+                        args: args.split(' ').map(str::to_owned).collect(),
+                    },
+                    None => Program::Just(matched.as_str().to_owned()),
+                };
+                return Action::Run {
+                    program,
+                    consume: true,
+                };
             }
         }
 
@@ -330,7 +329,10 @@ pub enum Action {
     Esc(String),
 
     /// Run given command.
-    Run(Program),
+    Run {
+        program: Program,
+        consume: bool,
+    },
 
     /// Scroll
     Scroll(i32),
@@ -896,6 +898,9 @@ fn convert(config_key_binding: ConfigKeyBinding) -> Result<KeyBinding, String> {
     if !config_key_binding.esc.is_empty() {
         action = Action::Esc(config_key_binding.esc);
     }
+    if let Action::Run { consume, .. } = &mut action {
+        *consume = config_key_binding.consume;
+    }
 
     let mut res_mode = ModeWrapper {
         mode: BindingMode::empty(),
@@ -1010,12 +1015,18 @@ pub fn config_key_bindings(
     for ckb in config_key_bindings {
         match convert(ckb) {
             Ok(key_binding) => {
-                // Remove any default binding that would conflict with this user binding
-                // This ensures user bindings always take precedence and prevents conflicts
-                bindings.retain(|b| !b.triggers_match(&key_binding));
-
+                let passthrough = key_binding.action.is_passthrough_run();
+                bindings.retain(|b| {
+                    b.action.is_passthrough_run() != passthrough
+                        || !b.triggers_match(&key_binding)
+                });
                 tracing::info!("added a new key_binding: {:?}", key_binding);
-                bindings.push(key_binding)
+                if passthrough {
+                    // Launch before the regular binding, which may finish handling the key.
+                    bindings.insert(0, key_binding);
+                } else {
+                    bindings.push(key_binding);
+                }
             }
             Err(err_message) => {
                 tracing::error!("error loading a key binding: {:?}", err_message);
@@ -1591,6 +1602,56 @@ mod tests {
     }
 
     #[test]
+    fn run_binding_keeps_the_command_and_its_consumption_setting() {
+        for consume in [false, true] {
+            let binding = convert(ConfigKeyBinding {
+                key: String::from("g"),
+                with: String::from("control"),
+                action: String::from("Run(helper set-english)"),
+                consume,
+                esc: String::new(),
+                mode: String::new(),
+            })
+            .unwrap();
+            assert_eq!(binding.action.is_passthrough_run(), !consume);
+            let Action::Run { program, .. } = binding.action else {
+                panic!("the command must run in either case");
+            };
+            assert_eq!(program.program(), "helper");
+            assert_eq!(program.args(), &["set-english"]);
+        }
+    }
+
+    #[test]
+    fn running_a_helper_preserves_the_applications_f1_sequence() {
+        let config = rio_backend::config::Config::default();
+        let defaults = default_key_bindings(&config);
+        let helper = ConfigKeyBinding {
+            key: "F1".into(),
+            with: String::new(),
+            action: "Run(helper)".into(),
+            consume: false,
+            esc: String::new(),
+            mode: String::new(),
+        };
+        let bindings = config_key_bindings(vec![helper.clone(), helper], defaults);
+        let key = BindingKey::Keycode {
+            key: Key::Named(F1),
+            location: KeyLocation::Standard,
+        };
+        let actions: Vec<_> = bindings
+            .iter()
+            .filter(|b| {
+                b.is_triggered_by(BindingMode::empty(), ModifiersState::empty(), &key)
+            })
+            .map(|b| &b.action)
+            .collect();
+        assert!(
+            matches!(actions.as_slice(), [Action::Run { .. }, Action::Esc(s)] if s == "\x1bOP")
+        );
+    }
+
+    #[test]
     fn bindings_overwrite() {
         let bindings = bindings!(
             KeyBinding;
@@ -1602,6 +1663,7 @@ mod tests {
             key: String::from("q"),
             action: String::from("receivechar"),
             with: String::from("super"),
+            consume: true,
             esc: String::from(""),
             mode: String::from(""),
         }];
@@ -1627,6 +1689,7 @@ mod tests {
                 key: String::from("pageup"),
                 action: String::from("scroll(1)"),
                 with: String::from(""),
+                consume: true,
                 esc: String::from(""),
                 mode: String::from(""),
             },
@@ -1634,6 +1697,7 @@ mod tests {
                 key: String::from("pagedown"),
                 action: String::from("scroll(-1)"),
                 with: String::from(""),
+                consume: true,
                 esc: String::from(""),
                 mode: String::from(""),
             },
@@ -1691,6 +1755,7 @@ mod tests {
             key: String::from("q"),
             action: String::from("quitt"),
             with: String::from("super"),
+            consume: true,
             esc: String::from(""),
             mode: String::from(""),
         }];
@@ -1706,6 +1771,7 @@ mod tests {
                 key: String::from(name),
                 action: String::from("quit"),
                 with: String::from(""),
+                consume: true,
                 esc: String::from(""),
                 mode: String::from(""),
             }];
@@ -1802,6 +1868,7 @@ mod tests {
             key: String::from("return"),
             action: String::from("scroll(1)"),
             with: String::from("alt"),
+            consume: true,
             esc: String::from(""),
             mode: String::from(""),
         }];

@@ -23,6 +23,7 @@ Where:
 - *key* is the key name (e.g., "q", "Enter", "F1")
 - *with* specifies modifier keys: "super", "alt", "ctrl", "shift"
 - *action* is the action to perform
+- *consume* defaults to true for Run commands. Set it to false to launch the command and continue normal processing of the same key. Rio does not wait for the command to finish.
 
 Multiple modifiers can be combined with "|", for example: "ctrl|shift".
 

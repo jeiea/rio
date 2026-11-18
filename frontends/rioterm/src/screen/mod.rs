@@ -1061,10 +1061,14 @@ impl Screen<'_> {
             };
 
             if binding.is_triggered_by(binding_mode.to_owned(), mods, &key_match) {
-                *ignore_chars.get_or_insert(true) &= action != Act::ReceiveChar;
+                if !action.is_passthrough_run() {
+                    *ignore_chars.get_or_insert(true) &= action != Act::ReceiveChar;
+                }
 
                 match &action {
-                    Act::Run(program) => self.exec(program.program(), program.args()),
+                    Act::Run { program, .. } => {
+                        self.exec(program.program(), program.args())
+                    }
                     Act::Esc(s) => {
                         self.paste(s, false);
                     }
@@ -5131,6 +5135,7 @@ mod tests {
                 key: "n".into(),
                 with: "control | alt".into(),
                 action: String::new(),
+                consume: true,
                 esc: esc.into(),
                 mode: String::new(),
             }],
@@ -5166,6 +5171,7 @@ mod tests {
                 key: "w".into(),
                 with: "shift".into(),
                 action: String::new(),
+                consume: true,
                 esc: "\x1b[119;2u".into(),
                 mode: String::new(),
             }],
