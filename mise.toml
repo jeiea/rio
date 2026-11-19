@@ -1,3 +1,7 @@
 [tasks.build]
 description = "Build Rio and replace the locally configured installed executable"
 run = "deno run --allow-env=RIO_INSTALL_PATH --allow-read --allow-write --allow-run=cargo build.ts"
+
+[tasks.install]
+description = "Back up the installed Rio and replace it with the existing Windows release build"
+run_windows = "pwsh -NoProfile -File install.ps1"

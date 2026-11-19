@@ -17,6 +17,7 @@ release
 .jekyll-metadata
 NOTES
 *.log
+/mise.local.toml
 
 # for nix users
 .direnv/
