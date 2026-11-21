@@ -7,6 +7,10 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Mutex, MutexGuard};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows_sys::Win32::System::Console::{
+    CAPSLOCK_ON, ENHANCED_KEY, LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED, NUMLOCK_ON,
+    RIGHT_ALT_PRESSED, RIGHT_CTRL_PRESSED, SCROLLLOCK_ON, SHIFT_PRESSED,
+};
 use windows_sys::Win32::System::SystemServices::LANG_KOREAN;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, GetKeyboardLayout, GetKeyboardState, MapVirtualKeyExW,
@@ -32,6 +36,7 @@ use crate::event::{ElementState, KeyEvent};
 use crate::keyboard::{
     Key, KeyCode, KeyLocation, NamedKey, NativeKey, NativeKeyCode, PhysicalKey,
 };
+use crate::platform::windows::WindowsKeyData;
 use crate::platform_impl::platform::event_loop::ProcResult;
 use crate::platform_impl::platform::keyboard_layout::{
     Layout, LayoutCache, WindowsModifiers, LAYOUT_CACHE,
@@ -488,6 +493,7 @@ impl KeyEventBuilder {
         };
         let event_info = PartialKeyEventInfo {
             vkey: vk,
+            native: None,
             logical_key: PartialLogicalKey::This(logical_key.clone()),
             key_without_modifiers,
             key_state,
@@ -527,6 +533,7 @@ enum PartialLogicalKey {
 
 struct PartialKeyEventInfo {
     vkey: VIRTUAL_KEY,
+    native: Option<WindowsKeyData>,
     key_state: ElementState,
     is_repeat: bool,
     physical_key: PhysicalKey,
@@ -629,6 +636,15 @@ impl PartialKeyEventInfo {
 
         PartialKeyEventInfo {
             vkey,
+            native: Some(WindowsKeyData {
+                virtual_key: vkey,
+                scan_code: scancode & 0xff,
+                control_key_state: console_control_key_state(
+                    &kbd_state,
+                    lparam_struct.extended,
+                ),
+                repeat_count: loword(lparam as u32),
+            }),
             key_state: state,
             logical_key,
             key_without_modifiers,
@@ -687,11 +703,31 @@ impl PartialKeyEventInfo {
             state: self.key_state,
             repeat: self.is_repeat,
             platform_specific: KeyEventExtra {
+                native: self.native,
                 text_with_all_modifiers: char_with_all_modifiers,
                 key_without_modifiers: self.key_without_modifiers,
             },
         }
     }
+}
+
+fn console_control_key_state(keys: &[u8; 256], extended: bool) -> u32 {
+    let mut flags = if extended { ENHANCED_KEY } else { 0 };
+    for (vk, mask, flag) in [
+        (VK_LMENU, 0x80, LEFT_ALT_PRESSED),
+        (VK_RMENU, 0x80, RIGHT_ALT_PRESSED),
+        (VK_LCONTROL, 0x80, LEFT_CTRL_PRESSED),
+        (VK_RCONTROL, 0x80, RIGHT_CTRL_PRESSED),
+        (VK_SHIFT, 0x80, SHIFT_PRESSED),
+        (VK_CAPITAL, 1, CAPSLOCK_ON),
+        (VK_NUMLOCK, 1, NUMLOCK_ON),
+        (VK_SCROLL, 1, SCROLLLOCK_ON),
+    ] {
+        if keys[vk as usize] & mask != 0 {
+            flags |= flag;
+        }
+    }
+    flags
 }
 
 #[derive(Debug, Copy, Clone)]

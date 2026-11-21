@@ -65,6 +65,12 @@ pub struct Screen<'screen> {
     bindings: crate::bindings::KeyBindings,
     mouse_bindings: Vec<MouseBinding>,
     pub modifiers: Modifiers,
+    /// Only deliver a native key release to the pane that received its press.
+    #[cfg(windows)]
+    win32_key_presses: rustc_hash::FxHashMap<
+        rio_window::keyboard::PhysicalKey,
+        (usize, rio_window::platform::windows::WindowsKeyData),
+    >,
     pub mouse: Mouse,
     pub touchpurpose: TouchPurpose,
     pub search_state: SearchState,
@@ -341,6 +347,8 @@ impl Screen<'_> {
             last_hint_probe: None,
             mouse_bindings: crate::bindings::default_mouse_bindings(),
             modifiers: Modifiers::default(),
+            #[cfg(windows)]
+            win32_key_presses: Default::default(),
             context_manager,
             ime: crate::ime::Ime::new(),
             last_preedit_row: None,
@@ -803,12 +811,68 @@ impl Screen<'_> {
         mode
     }
 
+    #[cfg(windows)]
+    pub fn finish_win32_key(&mut self, key: &rio_window::event::KeyEvent) -> bool {
+        if key.state != ElementState::Released {
+            if !key.repeat {
+                self.win32_key_presses.remove(&key.physical_key);
+            }
+            return false;
+        }
+        let Some((owner, _)) = self.win32_key_presses.remove(&key.physical_key) else {
+            return false;
+        };
+        // The same pane may now request Kitty release reports.
+        key.windows_key_data()
+            .is_some_and(|native| self.send_win32_release(owner, native))
+            || owner != self.ctx().current().route_id
+    }
+
+    #[cfg(windows)]
+    pub fn release_win32_keys_on_focus_loss(&mut self) {
+        for (_, (owner, mut native)) in std::mem::take(&mut self.win32_key_presses) {
+            use windows_sys::Win32::System::Console::{
+                LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED, RIGHT_ALT_PRESSED,
+                RIGHT_CTRL_PRESSED, SHIFT_PRESSED,
+            };
+            native.control_key_state &= !(LEFT_ALT_PRESSED
+                | LEFT_CTRL_PRESSED
+                | RIGHT_ALT_PRESSED
+                | RIGHT_CTRL_PRESSED
+                | SHIFT_PRESSED);
+            native.repeat_count = 1;
+            self.send_win32_release(owner, native);
+        }
+    }
+
+    #[cfg(windows)]
+    fn send_win32_release(
+        &mut self,
+        owner: usize,
+        native: rio_window::platform::windows::WindowsKeyData,
+    ) -> bool {
+        let Some(pane) = self.context_manager.get_by_route_id(owner) else {
+            return true;
+        };
+        if !pane.val.terminal.lock().mode().win32_input() {
+            return false;
+        }
+        let bytes =
+            crate::bindings::win32_keyboard::encode(native, ElementState::Released, "");
+        pane.val.messenger.send_write(bytes);
+        true
+    }
+
     #[inline]
     pub fn process_key_event(
         &mut self,
         key: &rio_window::event::KeyEvent,
         clipboard: &mut Clipboard,
     ) {
+        #[cfg(windows)]
+        if self.finish_win32_key(key) {
+            return;
+        }
         if self.ime.preedit().is_some() {
             return;
         }
@@ -917,6 +981,50 @@ impl Screen<'_> {
             return;
         }
 
+        #[cfg(windows)]
+        if mode.win32_input() {
+            if let Some(native) = key.windows_key_data() {
+                // The IME delivers its result separately through Ime::Commit.
+                if key.logical_key == Key::Named(NamedKey::Process) {
+                    return;
+                }
+                let owner = self.ctx().current().route_id;
+                if key.repeat
+                    && self
+                        .win32_key_presses
+                        .get(&key.physical_key)
+                        .is_some_and(|(previous, _)| *previous != owner)
+                {
+                    return;
+                }
+                // Reporting modifiers and IME switches must not clear a selection.
+                let typing = !text.is_empty()
+                    || !self.vt_key_press_bytes(key, text, mode, mods).is_empty();
+                if typing && !self.prepare_for_typing() {
+                    return;
+                }
+                let bytes =
+                    crate::bindings::win32_keyboard::encode(native, key.state, text);
+                self.win32_key_presses
+                    .insert(key.physical_key, (owner, native));
+                self.ctx_mut().current_mut().messenger.send_write(bytes);
+                return;
+            }
+        }
+
+        let bytes = self.vt_key_press_bytes(key, text, mode, mods);
+        if !bytes.is_empty() && self.prepare_for_typing() {
+            self.ctx_mut().current_mut().messenger.send_write(bytes);
+        }
+    }
+
+    fn vt_key_press_bytes(
+        &self,
+        key: &rio_window::event::KeyEvent,
+        text: &str,
+        mode: Mode,
+        mods: ModifiersState,
+    ) -> Vec<u8> {
         // Mask `Alt` modifier from input when we won't send esc.
         let mods = if self.alt_send_esc(key, text) {
             mods
@@ -945,7 +1053,7 @@ impl Screen<'_> {
             crate::bindings::ctrl_seq(&key.logical_key, text, mods)
         };
 
-        let bytes = if let Some(c0) = ctrl_c0 {
+        if let Some(c0) = ctrl_c0 {
             if mods.alt_key() {
                 vec![b'\x1b', c0]
             } else {
@@ -961,18 +1069,16 @@ impl Screen<'_> {
 
             bytes.extend_from_slice(text.as_bytes());
             bytes
-        };
-
-        if !bytes.is_empty() {
-            if self.context_manager.close_if_exited() {
-                return;
-            }
-
-            self.scroll_bottom_when_cursor_not_visible();
-            self.clear_selection();
-
-            self.ctx_mut().current_mut().messenger.send_write(bytes);
         }
+    }
+
+    fn prepare_for_typing(&mut self) -> bool {
+        if self.context_manager.close_if_exited() {
+            return false;
+        }
+        self.scroll_bottom_when_cursor_not_visible();
+        self.clear_selection();
+        true
     }
 
     /// Check whether we should try to build escape sequence for the [`KeyEvent`].
@@ -1886,7 +1992,7 @@ impl Screen<'_> {
     }
 
     /// Whether we should send `ESC` due to `Alt` being pressed.
-    fn alt_send_esc(&mut self, key: &rio_window::event::KeyEvent, text: &str) -> bool {
+    fn alt_send_esc(&self, key: &rio_window::event::KeyEvent, text: &str) -> bool {
         #[cfg(not(target_os = "macos"))]
         let alt_send_esc = self.modifiers.state().alt_key();
 

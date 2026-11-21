@@ -71,6 +71,8 @@ impl PrivateMode {
             2004 => Self::Named(NamedPrivateMode::BracketedPaste),
             2026 => Self::Named(NamedPrivateMode::SyncUpdate),
             2027 => Self::Named(NamedPrivateMode::GraphemeCluster),
+            #[cfg(windows)]
+            9001 => Self::Named(NamedPrivateMode::Win32Input),
             _ => Self::Unknown(mode),
         }
     }
@@ -136,6 +138,8 @@ pub enum NamedPrivateMode {
     /// width-bearing codepoint. Queryable via DECRQM, which is how
     /// applications detect support. Default: reset.
     GraphemeCluster = 2027,
+    #[cfg(windows)]
+    Win32Input = 9001,
 }
 
 /// Mode for clearing line.

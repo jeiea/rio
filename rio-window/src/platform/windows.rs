@@ -7,7 +7,7 @@ use std::ffi::c_void;
 use std::path::Path;
 
 use crate::dpi::PhysicalSize;
-use crate::event::DeviceId;
+use crate::event::{DeviceId, KeyEvent};
 use crate::event_loop::EventLoopBuilder;
 use crate::monitor::MonitorHandle;
 use crate::window::{BadIcon, Icon, Window, WindowAttributes};
@@ -16,6 +16,72 @@ use crate::window::{BadIcon, Icon, Window, WindowAttributes};
 pub type HWND = *mut c_void;
 /// Menu Handle type used by Win32 API
 pub type HMENU = *mut c_void;
+
+/// Native fields of a Windows keyboard message, captured before layout translation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WindowsKeyData {
+    /// Virtual key supplied by the window message.
+    pub virtual_key: u16,
+    /// Hardware scan code (without the extended-key prefix).
+    pub scan_code: u16,
+    /// Console control-key flags, including left/right modifiers and lock states.
+    pub control_key_state: u32,
+    /// Number of keystrokes coalesced into this message.
+    pub repeat_count: u16,
+}
+
+impl WindowsKeyData {
+    /// Translate a key release on the current window thread. Windows only
+    /// posts WM_CHAR for presses, but a console release can also carry a WCHAR.
+    pub fn release_code_unit(&self) -> u16 {
+        use windows_sys::Win32::System::Console::{
+            CAPSLOCK_ON, LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED, NUMLOCK_ON,
+            RIGHT_ALT_PRESSED, RIGHT_CTRL_PRESSED, SCROLLLOCK_ON, SHIFT_PRESSED,
+        };
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+            ToUnicodeEx, VK_CAPITAL, VK_CONTROL, VK_MENU, VK_NUMLOCK, VK_SCROLL, VK_SHIFT,
+        };
+        let mut state = [0; 256];
+        for (vk, flags, value) in [
+            (VK_SHIFT, SHIFT_PRESSED, 0x80),
+            (VK_CONTROL, LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED, 0x80),
+            (VK_MENU, LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED, 0x80),
+            (VK_CAPITAL, CAPSLOCK_ON, 1),
+            (VK_NUMLOCK, NUMLOCK_ON, 1),
+            (VK_SCROLL, SCROLLLOCK_ON, 1),
+        ] {
+            if self.control_key_state & flags != 0 {
+                state[vk as usize] = value;
+            }
+        }
+        let mut utf16 = [0; 2];
+        // Match Windows Terminal: disable Alt+numpad composition and leave
+        // pending dead keys untouched. A console record holds one WCHAR.
+        let len = unsafe {
+            ToUnicodeEx(
+                self.virtual_key.into(),
+                self.scan_code.into(),
+                state.as_ptr(),
+                utf16.as_mut_ptr(),
+                2,
+                0b101,
+                std::ptr::null_mut(),
+            )
+        };
+        if matches!(len, 1 | -1) {
+            utf16[0]
+        } else {
+            0
+        }
+    }
+}
+
+impl KeyEvent {
+    /// Native keyboard data, when this event originated from a keyboard message.
+    pub fn windows_key_data(&self) -> Option<WindowsKeyData> {
+        self.platform_specific.native
+    }
+}
 /// Monitor Handle type used by Win32 API
 pub type HMONITOR = *mut c_void;
 

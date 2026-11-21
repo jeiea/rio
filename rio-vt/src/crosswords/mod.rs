@@ -110,6 +110,8 @@ bitflags! {
         /// DEC private mode 2026: synchronized output. While set, bytes
         /// still reach the grid but the renderer holds the last frame.
         const SYNC_UPDATE             = 1 << 25;
+        #[cfg(windows)]
+        const WIN32_INPUT             = 1 << 26;
         const MOUSE_MODE = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits() | Self::MOUSE_REPORT_X10.bits();
         const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
                                       | Self::REPORT_EVENT_TYPES.bits()
@@ -153,6 +155,15 @@ impl Default for Mode {
             | Mode::ALTERNATE_SCROLL
             | Mode::URGENCY_HINTS
             | Mode::SIXEL_PRIV_PALETTE
+    }
+}
+
+#[cfg(windows)]
+impl Mode {
+    /// A child that explicitly negotiated Kitty keys owns its input format.
+    pub fn win32_input(self) -> bool {
+        self.contains(Self::WIN32_INPUT)
+            && !self.intersects(Self::KITTY_KEYBOARD_PROTOCOL)
     }
 }
 
@@ -3374,6 +3385,8 @@ impl<U: EventListener> Handler for Crosswords<U> {
                     .send_event(RioEvent::CursorBlinkingChange, self.window_id);
             }
             NamedPrivateMode::GraphemeCluster => self.mode.insert(Mode::GRAPHEME_CLUSTER),
+            #[cfg(windows)]
+            NamedPrivateMode::Win32Input => self.mode.insert(Mode::WIN32_INPUT),
             NamedPrivateMode::SyncUpdate => {
                 self.mode.insert(Mode::SYNC_UPDATE);
                 self.sync_update_started = Some(crate::time::Instant::now());
@@ -3451,6 +3464,8 @@ impl<U: EventListener> Handler for Crosswords<U> {
                     .send_event(RioEvent::CursorBlinkingChange, self.window_id);
             }
             NamedPrivateMode::GraphemeCluster => self.mode.remove(Mode::GRAPHEME_CLUSTER),
+            #[cfg(windows)]
+            NamedPrivateMode::Win32Input => self.mode.remove(Mode::WIN32_INPUT),
             NamedPrivateMode::SyncUpdate => self.end_sync_update(),
         }
     }
@@ -3511,6 +3526,10 @@ impl<U: EventListener> Handler for Crosswords<U> {
                     self.mode.contains(Mode::SYNC_UPDATE).into()
                 }
                 NamedPrivateMode::ColumnMode => ModeState::NotSupported,
+                #[cfg(windows)]
+                NamedPrivateMode::Win32Input => {
+                    self.mode.contains(Mode::WIN32_INPUT).into()
+                }
             },
             PrivateMode::Unknown(_) => ModeState::NotSupported,
         };
@@ -12068,6 +12087,23 @@ mod tests {
         let extras = cw.grid.extras_table.get(cell.extras_id().unwrap()).unwrap();
         assert_eq!(extras.zerowidth, vec!['\u{1F3FB}']);
         assert_eq!(cw.grid.cursor.pos.col, col_after_modifier);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conpty_can_enable_and_disable_native_keyboard_input() {
+        use crate::performer::handler::Processor;
+        let mut term = new_term(6, 3);
+        let mut parser = Processor::default();
+        assert!(!term.mode().win32_input());
+        parser.advance(&mut term, b"\x1b[?9001h");
+        assert!(term.mode().win32_input());
+        parser.advance(&mut term, b"\x1b[>1u");
+        assert!(!term.mode().win32_input());
+        parser.advance(&mut term, b"\x1b[<1u");
+        assert!(term.mode().win32_input());
+        parser.advance(&mut term, b"\x1b[?9001l");
+        assert!(!term.mode().win32_input());
     }
 
     /// DEC private mode 2027 (grapheme cluster processing): set,

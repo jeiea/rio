@@ -2213,6 +2213,9 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 ..
             } => {
                 if route.has_key_wait(&key_event, &mut self.router.clipboard) {
+                    // A pane can still own a press from before the overlay opened.
+                    #[cfg(windows)]
+                    route.window.screen.finish_win32_key(&key_event);
                     if route.path != RoutePath::Terminal
                         && key_event.state == ElementState::Released
                     {
@@ -2316,6 +2319,10 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
 
             WindowEvent::Focused(focused) => {
+                #[cfg(windows)]
+                if !focused {
+                    route.window.screen.release_win32_keys_on_focus_loss();
+                }
                 if self.config.hide_cursor_when_typing {
                     route.window.winit_window.set_cursor_visible(true);
                 }

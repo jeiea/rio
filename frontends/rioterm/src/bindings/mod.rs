@@ -3,6 +3,8 @@
 // which is licensed under Apache 2.0 license.
 
 pub mod kitty_keyboard;
+#[cfg(windows)]
+pub mod win32_keyboard;
 
 use crate::crosswords::vi_mode::ViMotion;
 use crate::crosswords::Mode;
@@ -162,6 +164,8 @@ bitflags! {
         const SEARCH              = 0b0001_0000;
         const DISAMBIGUATE_KEYS   = 0b0010_0000;
         const ALL_KEYS_AS_ESC     = 0b0100_0000;
+        #[cfg(windows)]
+        const WIN32_INPUT         = 0b1000_0000;
     }
 }
 
@@ -181,6 +185,8 @@ impl BindingMode {
             mode.contains(Mode::REPORT_ALL_KEYS_AS_ESC),
         );
         binding_mode.set(BindingMode::VI, mode.contains(Mode::VI));
+        #[cfg(windows)]
+        binding_mode.set(BindingMode::WIN32_INPUT, mode.win32_input());
         binding_mode
     }
 }
@@ -756,6 +762,15 @@ pub fn default_key_bindings(config: &rio_backend::config::Config) -> Vec<KeyBind
         Key::Named(Tab),       ModifiersState::SHIFT,   ~BindingMode::VI,   ~BindingMode::SEARCH, ~BindingMode::ALL_KEYS_AS_ESC, ~BindingMode::DISAMBIGUATE_KEYS; Action::Esc("\x1b[Z".into());
         Key::Named(Tab),       ModifiersState::SHIFT | ModifiersState::ALT, ~BindingMode::VI, ~BindingMode::SEARCH, ~BindingMode::ALL_KEYS_AS_ESC, ~BindingMode::DISAMBIGUATE_KEYS; Action::Esc("\x1b\x1b[Z".into());
     ));
+
+    // ConPTY translates native records for navigation and function keys itself.
+    // Platform shortcuts and user-defined sequences below are explicit overrides.
+    #[cfg(windows)]
+    for binding in &mut bindings {
+        if matches!(binding.action, Action::Esc(_) | Action::ClearLogNotice) {
+            binding.notmode.insert(BindingMode::WIN32_INPUT);
+        }
+    }
 
     bindings.extend(platform_key_bindings(
         config.navigation.has_navigation_key_bindings(),
@@ -1649,6 +1664,15 @@ mod tests {
         assert!(
             matches!(actions.as_slice(), [Action::Run { .. }, Action::Esc(s)] if s == "\x1bOP")
         );
+        #[cfg(windows)]
+        {
+            let native = BindingMode::new(&Mode::WIN32_INPUT, false);
+            let mut actions = bindings.iter().filter(|binding| {
+                binding.is_triggered_by(native.clone(), ModifiersState::empty(), &key)
+            });
+            assert!(actions.next().unwrap().action.is_passthrough_run());
+            assert!(actions.next().is_none());
+        }
     }
 
     #[test]
